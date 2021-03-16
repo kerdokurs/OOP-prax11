@@ -26,29 +26,32 @@ public class Server {
 
   private void start() throws IOException {
     selector = Selector.open();
-    final ServerSocketChannel serverChannel = ServerSocketChannel.open();
-    serverChannel.configureBlocking(false);
+    try (ServerSocketChannel serverChannel = ServerSocketChannel.open()) {
+      serverChannel.configureBlocking(false);
 
-    serverChannel.socket().bind(address);
-    serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+      serverChannel.socket().bind(address);
 
-    System.out.println("server has started");
+      int ops = serverChannel.validOps();
+      serverChannel.register(selector, ops, null);
 
-    while (true) {
-      selector.select();
+      System.out.println("server has started");
 
-      final Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
+      while (true) {
+        selector.select();
 
-      while (keys.hasNext()) {
-        final SelectionKey key = keys.next();
+        final Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
 
-        keys.remove();
+        while (keys.hasNext()) {
+          final SelectionKey key = keys.next();
 
-        if (!key.isValid()) continue;
+          keys.remove();
 
-        if (key.isAcceptable()) accept(key);
-        if (key.isReadable()) read(key);
-        if (key.isWritable()) write(key);
+          if (!key.isValid()) continue;
+
+          if (key.isAcceptable()) accept(key);
+          if (key.isReadable()) read(key);
+          if (key.isWritable()) write(key);
+        }
       }
     }
   }
@@ -68,10 +71,17 @@ public class Server {
 
   private void read(final SelectionKey key) throws IOException {
     final SocketChannel channel = (SocketChannel) key.channel();
+    if (!channel.isOpen()) {
+      System.out.println("Channel closed, skipping key");
+    }
 
     final ByteBuffer infoBuffer = ByteBuffer.allocate(8);
 
     int numRead = channel.read(infoBuffer);
+    if (numRead == 0) {
+      // Client did not send us anything on this loop iteration
+      return;
+    }
 
     if (numRead == -1) {
       final Socket socket = channel.socket();
@@ -85,11 +95,16 @@ public class Server {
       return;
     }
 
+    infoBuffer.flip();
+
     final int type = infoBuffer.getInt();
     final int size = infoBuffer.getInt();
 
     final ByteBuffer messageBuffer = ByteBuffer.allocate(size);
     channel.read(messageBuffer);
+
+    messageBuffer.flip();
+
     final String message = new String(messageBuffer.array());
 
     parse(channel, type, message);
@@ -131,6 +146,7 @@ public class Server {
     buffer.putInt(type);
     buffer.putInt(size);
     buffer.put(bytes);
+    buffer.flip();
 
     final Queue<ByteBuffer> current = dataMapper.get(channel);
     current.add(buffer);
@@ -142,11 +158,17 @@ public class Server {
   private void write(final SelectionKey key) throws IOException {
     final SocketChannel channel = (SocketChannel) key.channel();
 
+    read(key);
+
     final Queue<ByteBuffer> buffers = dataMapper.get(channel);
     if (buffers == null) return;
 
     final ByteBuffer current = buffers.poll();
-    if (current == null) return;
+    if (current == null){
+      // No pending buffer, we are in a loop with open connection. Maybe client sent something?
+      read(key);
+      return;
+    }
 
     channel.write(current);
   }
